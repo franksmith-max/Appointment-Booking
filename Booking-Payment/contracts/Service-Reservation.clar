@@ -52,6 +52,8 @@
 (define-constant ERR_PAYMENT_FAILED (err u108))
 (define-constant ERR_TOO_LATE_TO_MODIFY (err u109))
 (define-constant ERR_INVALID_PRICE (err u110))
+(define-constant ERR_INVALID_SERVICE_TYPE (err u111))
+(define-constant ERR_INVALID_APPOINTMENT_ID (err u112))
 
 ;; Read-only functions
 
@@ -135,10 +137,30 @@
 
 ;; Public functions
 
+;; Validate service type
+(define-private (validate-service-type (service-type (string-ascii 50)))
+  (begin
+    ;; Additional validation can be added here based on your requirements
+    ;; For example, check if it's one of a predefined set of allowed values
+    ;; For now, we'll just check if it's not empty
+    (> (len service-type) u0)
+  )
+)
+
+;; Validate appointment ID
+(define-private (validate-appointment-id (appointment-id uint))
+  (begin
+    ;; Check if ID is less than the next available ID (meaning it could exist)
+    ;; and greater than 0
+    (and (< u0 appointment-id) (< appointment-id (var-get next-appointment-id)))
+  )
+)
+
 ;; Set service price (only for providers)
 (define-public (set-service-price (service-type (string-ascii 50)) (price uint))
   (begin
     (asserts! (> price u0) ERR_INVALID_PRICE)
+    (asserts! (validate-service-type service-type) ERR_INVALID_SERVICE_TYPE)
     (ok (map-set service-prices
       { provider: tx-sender, service-type: service-type }
       { price: price }
@@ -180,6 +202,9 @@
   (service-type (string-ascii 50))
 )
   (begin
+    ;; Validate service type
+    (asserts! (validate-service-type service-type) ERR_INVALID_SERVICE_TYPE)
+    
     ;; Get necessary variables
     (let ((client tx-sender)
           (appointment-id (var-get next-appointment-id))
@@ -226,6 +251,9 @@
 ;; Pay remaining balance for appointment
 (define-public (pay-appointment-balance (appointment-id uint))
   (begin
+    ;; Validate appointment ID
+    (asserts! (validate-appointment-id appointment-id) ERR_INVALID_APPOINTMENT_ID)
+    
     (let (
       (appointment (unwrap! (map-get? appointments { appointment-id: appointment-id }) ERR_APPOINTMENT_NOT_FOUND))
       (client (get client appointment))
@@ -257,29 +285,37 @@
 
 ;; Cancel an appointment
 (define-public (cancel-appointment (appointment-id uint))
-  (let (
-    (appointment (unwrap! (map-get? appointments { appointment-id: appointment-id }) ERR_APPOINTMENT_NOT_FOUND))
-    (provider (get provider appointment))
-    (client (get client appointment))
-    (status (get status appointment))
-  )
-    ;; Check if the appointment is in "booked" or "rescheduled" status
-    (asserts! (or (is-eq status "booked") (is-eq status "rescheduled")) ERR_INVALID_OPERATION)
+  (begin
+    ;; Validate appointment ID
+    (asserts! (validate-appointment-id appointment-id) ERR_INVALID_APPOINTMENT_ID)
     
-    ;; Verify that sender is either the client or provider
-    (asserts! (or (is-eq tx-sender client) (is-eq tx-sender provider)) ERR_UNAUTHORIZED)
-    
-    ;; Update appointment status to "cancelled"
-    (ok (map-set appointments
-      { appointment-id: appointment-id }
-      (merge appointment { status: "cancelled" })
-    ))
+    (let (
+      (appointment (unwrap! (map-get? appointments { appointment-id: appointment-id }) ERR_APPOINTMENT_NOT_FOUND))
+      (provider (get provider appointment))
+      (client (get client appointment))
+      (status (get status appointment))
+    )
+      ;; Check if the appointment is in "booked" or "rescheduled" status
+      (asserts! (or (is-eq status "booked") (is-eq status "rescheduled")) ERR_INVALID_OPERATION)
+      
+      ;; Verify that sender is either the client or provider
+      (asserts! (or (is-eq tx-sender client) (is-eq tx-sender provider)) ERR_UNAUTHORIZED)
+      
+      ;; Update appointment status to "cancelled"
+      (ok (map-set appointments
+        { appointment-id: appointment-id }
+        (merge appointment { status: "cancelled" })
+      ))
+    )
   )
 )
 
 ;; Process refund (if appointment is cancelled)
 (define-public (process-refund (appointment-id uint))
   (begin
+    ;; Validate appointment ID
+    (asserts! (validate-appointment-id appointment-id) ERR_INVALID_APPOINTMENT_ID)
+    
     (let (
       (appointment (unwrap! (map-get? appointments { appointment-id: appointment-id }) ERR_APPOINTMENT_NOT_FOUND))
       (client (get client appointment))
@@ -315,6 +351,9 @@
 ;; Mark appointment as completed (only provider can do this)
 (define-public (complete-appointment (appointment-id uint))
   (begin
+    ;; Validate appointment ID
+    (asserts! (validate-appointment-id appointment-id) ERR_INVALID_APPOINTMENT_ID)
+    
     (let (
       (appointment (unwrap! (map-get? appointments { appointment-id: appointment-id }) ERR_APPOINTMENT_NOT_FOUND))
       (provider (get provider appointment))
@@ -369,38 +408,43 @@
 
 ;; Reschedule an appointment
 (define-public (reschedule-appointment (appointment-id uint) (new-date uint))
-  (let (
-    (appointment (unwrap! (map-get? appointments { appointment-id: appointment-id }) ERR_APPOINTMENT_NOT_FOUND))
-    (provider (get provider appointment))
-    (client (get client appointment))
-    (current-date (get date appointment))
-    (duration (get duration appointment))
-    (status (get status appointment))
-    (current-time (get-current-time))
-  )
-    ;; Check if the appointment is in "booked" status
-    (asserts! (is-eq status "booked") ERR_INVALID_OPERATION)
+  (begin
+    ;; Validate appointment ID
+    (asserts! (validate-appointment-id appointment-id) ERR_INVALID_APPOINTMENT_ID)
     
-    ;; Verify that sender is the client
-    (asserts! (is-eq tx-sender client) ERR_UNAUTHORIZED)
-    
-    ;; Check if new date is in the future
-    (asserts! (> new-date current-time) ERR_INVALID_DATE)
-    
-    ;; Check if it's not too late to modify (at least 12 hours before)
-    (asserts! (> (- current-date current-time) (* u12 u60 u60)) ERR_TOO_LATE_TO_MODIFY)
-    
-    ;; Check if the new timeslot is available
-    (asserts! (is-timeslot-available provider new-date duration) ERR_TIMESLOT_UNAVAILABLE)
-    
-    ;; Update appointment with new date and mark as rescheduled
-    (ok (map-set appointments
-      { appointment-id: appointment-id }
-      (merge appointment { 
-        date: new-date, 
-        status: "rescheduled" 
-      })
-    ))
+    (let (
+      (appointment (unwrap! (map-get? appointments { appointment-id: appointment-id }) ERR_APPOINTMENT_NOT_FOUND))
+      (provider (get provider appointment))
+      (client (get client appointment))
+      (current-date (get date appointment))
+      (duration (get duration appointment))
+      (status (get status appointment))
+      (current-time (get-current-time))
+    )
+      ;; Check if the appointment is in "booked" status
+      (asserts! (is-eq status "booked") ERR_INVALID_OPERATION)
+      
+      ;; Verify that sender is the client
+      (asserts! (is-eq tx-sender client) ERR_UNAUTHORIZED)
+      
+      ;; Check if new date is in the future
+      (asserts! (> new-date current-time) ERR_INVALID_DATE)
+      
+      ;; Check if it's not too late to modify (at least 12 hours before)
+      (asserts! (> (- current-date current-time) (* u12 u60 u60)) ERR_TOO_LATE_TO_MODIFY)
+      
+      ;; Check if the new timeslot is available
+      (asserts! (is-timeslot-available provider new-date duration) ERR_TIMESLOT_UNAVAILABLE)
+      
+      ;; Update appointment with new date and mark as rescheduled
+      (ok (map-set appointments
+        { appointment-id: appointment-id }
+        (merge appointment { 
+          date: new-date, 
+          status: "rescheduled" 
+        })
+      ))
+    )
   )
 )
 
@@ -411,6 +455,14 @@
   (new-service-type (optional (string-ascii 50)))
 )
   (begin
+    ;; Validate appointment ID
+    (asserts! (validate-appointment-id appointment-id) ERR_INVALID_APPOINTMENT_ID)
+    
+    ;; Validate service type if provided
+    (asserts! (or (is-none new-service-type) 
+                  (validate-service-type (unwrap! new-service-type ERR_INVALID_SERVICE_TYPE))) 
+              ERR_INVALID_SERVICE_TYPE)
+    
     (let (
       (appointment (unwrap! (map-get? appointments { appointment-id: appointment-id }) ERR_APPOINTMENT_NOT_FOUND))
       (provider (get provider appointment))
@@ -429,7 +481,7 @@
       
       ;; Check new price if service changed
       (new-price (if (is-some new-service-type)
-                    (get price (get-service-price provider (unwrap! new-service-type ERR_INVALID_OPERATION)))
+                    (get price (get-service-price provider (unwrap! new-service-type ERR_INVALID_SERVICE_TYPE)))
                     current-price))
       
       ;; Calculate price difference (if any)
